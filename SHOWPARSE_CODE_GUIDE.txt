@@ -1,0 +1,671 @@
+===============================================================================
+             SHOWPARSE.PY - V2 CODE GUIDE AND FUTURE-SESSION HANDOFF
+===============================================================================
+
+This file is the canonical handoff document for future showparse sessions.
+
+If a future agent starts with no memory of prior work, the intended bootstrap is:
+1. Read this file first
+2. Read showparse.py
+3. Run the regression suite
+4. Make changes with the behavior and design rules in this guide in mind
+
+showparse is now in a strong V2 state. The goal of this guide is not only to
+describe the code, but to explain the intent behind it so future changes stay
+correct and field-friendly.
+
+The bundled demo data in `test1/data` now includes 5 rich Cisco IOS/IOS XE
+captures plus 1 NX-OS prompt-spacing fixture for regression and demo use.
+
+
+TABLE OF CONTENTS
+-----------------
+1. READ THIS FIRST
+2. WHAT SHOWPARSE IS FOR
+3. STABLE CLI SURFACE
+4. QUERY GRAMMAR LAW
+5. CORE PARSING PHILOSOPHY
+6. MODIFIER INTENT
+7. HIGH-LEVEL DATA FLOW
+8. FUNCTION MAP
+9. INTENTIONAL BEHAVIORS THAT SHOULD NOT BE "CLEANED UP"
+10. FIXTURE STRATEGY
+11. REGRESSION WORKFLOW
+12. SAFE CHANGE CHECKLIST
+13. QUICK REFERENCE: WHERE TO MODIFY
+
+
+===============================================================================
+1. READ THIS FIRST
+===============================================================================
+
+SHORT VERSION:
+    showparse extracts prompt-delimited command output from network collection
+    files. The parser is intentionally strict because false positives are worse
+    than missing a vague match.
+
+CURRENT STABLE CLI FLAGS:
+    -q    standard query mode
+    -Q    block-aware query mode
+    -A    require all queries to return content for a file
+    -r    raw grep-style output
+    -n    notes mode with deduplication
+    -o    save the final notes report to a file (notes mode only)
+
+CURRENT MODIFIERS:
+    %    matched substring only
+    +    all prompt-delimited command matches for that query
+    @    parent + matched child lines only (-Q only)
+    /    case-sensitive pattern matching
+
+MOST IMPORTANT RULE IN THE WHOLE TOOL:
+    Query commands start with a letter.
+    Modifiers are symbolic non-letter characters only.
+
+WHY THAT RULE EXISTS:
+    It keeps modifier parsing simple and safe.
+    If the first character is a letter, the query starts with the command.
+    If the first character is a defined symbolic modifier, everything up to the
+    first colon is treated as the modifier set.
+
+FUTURE MODIFIER RULE:
+    Do not add letter-based modifiers.
+    Keep modifiers symbolic so command-vs-modifier detection stays unambiguous.
+
+
+===============================================================================
+2. WHAT SHOWPARSE IS FOR
+===============================================================================
+
+showparse is built for real-world network collection files where device output
+has been captured as a sequence of command prompts and command output.
+
+EXPECTED FILE SHAPE:
+    Router1#show version
+    <output lines>
+    Router1#show running-config
+    <output lines>
+
+    switch1# show version
+    <output lines>
+    switch1# show running-config
+    <output lines>
+
+PRIMARY JOB:
+    Extract one or more command outputs safely, then optionally filter them
+    into the exact shape needed for field analysis or notes/reporting.
+
+WHY THE TOOL EXISTS:
+    Standard grep is too loose for these captures because commands like
+    `show run` can appear inside `show history`, logs, or other command output.
+    showparse first finds the real command invocation at the prompt, then
+    filters inside the extracted output. That is the foundation of the tool.
+
+PRODUCT GOAL:
+    Make it easy to cut deeply into collection files while still producing
+    stable, normalized output that groups well in notes mode.
+
+
+===============================================================================
+3. STABLE CLI SURFACE
+===============================================================================
+
+STANDARD QUERY MODE:
+    -q "show version"
+        Extract full output for one command
+
+    -q "show run:hostname|username"
+        Extract command output and return matching lines only
+
+    -q "%:show logging:Trap logging: level \\w+"
+        Extract command output and return only the matched substring from each
+        matching line
+
+    -q "+:show run:hostname|username|logging host"
+        Run the query against every prompt-delimited command that matches the
+        command prefix
+
+BLOCK QUERY MODE:
+    -Q "show run:shutdown"
+        Return full parent/child config blocks containing a match
+
+    -Q "@:show run:switchport mode access|shutdown"
+        Return parent + matched child lines only unless the parent itself
+        matched
+
+    -Q "%:show run:shutdown"
+        Keep full block context but trim matching lines down to the matched
+        substring only
+
+OUTPUT FLAGS:
+    -A
+        AND mode. All queries must return content for a file to be shown.
+
+    -r
+        Raw mode. Prefix each non-empty output line with `filename:`.
+
+    -n
+        Notes mode. Deduplicate identical rendered outputs, review each unique
+        output once, and collect notes.
+
+    -o PATH
+        Notes mode only. Save the final NOTES REPORT block to a file instead of
+        printing it to stdout.
+
+REMOVED V2 FLAGS:
+    -c, -g, -G
+
+CURRENT HELP/DOC MODEL:
+    The CLI is intentionally query-centric now. All extraction and filtering
+    flows through -q and -Q.
+
+
+===============================================================================
+4. QUERY GRAMMAR LAW
+===============================================================================
+
+BASIC SHAPES:
+    -q "command"
+    -q "command:pattern"
+    -q "modifiers:command:pattern"
+
+    -Q "command:pattern"
+    -Q "modifiers:command:pattern"
+
+NOTE:
+    The code currently allows `-Q "command"` and `-Q "+:command"` because the
+    same parser is used underneath. In practice, -Q is intended for block-aware
+    queries and is normally used with a pattern.
+
+COLON RULE:
+    Only the first colon after the command split matters.
+    Patterns may still contain colons.
+
+EXAMPLES:
+    "show version"
+        command = show version
+        pattern = None
+
+    "show run:interface:Ethernet0/1"
+        command = show run
+        pattern = interface:Ethernet0/1
+
+    "+%:show logging:Trap logging: level \\w+"
+        modifiers = +%
+        command = show logging
+        pattern = Trap logging: level \\w+
+
+MODIFIER COMPATIBILITY:
+    -q supports:
+        %  +  /
+
+    -Q supports:
+        %  +  @  /
+
+VALIDATION RULES:
+    - `@` is rejected on -q
+    - `%` requires a pattern
+    - `/` requires a pattern
+    - `@` requires a pattern
+    - `+` can be used with or without a pattern
+
+ORDER RULE:
+    Modifier order does not matter.
+    `+%`, `%+`, `/%`, `%/`, `+@%/`, etc. are treated as sets of modifiers.
+
+
+===============================================================================
+5. CORE PARSING PHILOSOPHY
+===============================================================================
+
+THIS IS THE SINGLE MOST IMPORTANT DESIGN SECTION.
+
+FOUNDATION:
+    showparse is prompt-delimited first, grep-like second.
+
+COMMAND START RULE:
+    A command match is valid only when it appears at column 0 with a prompt
+    token immediately before it, or with exactly one space after the prompt.
+
+SUPPORTED PROMPT STYLES:
+    Router1#show run
+    Router1# show run
+
+NOT SUPPORTED:
+    Router1#  show run
+    "  show run" inside indented output
+
+WHY SO STRICT:
+    The tool is deliberately designed to avoid matching indented `show history`
+    entries, log text, or other command-looking strings that are not actual
+    prompt-delimited command invocations.
+
+PROMPT TOKEN RULE:
+    Prompt detection uses a token ending in a common prompt character like
+    `#`, `>`, `$`, or `%`. This keeps metadata lines such as `!Command:` from
+    being treated as device prompts.
+
+COMMAND MATCH RULE:
+    Command extraction is case-insensitive and prefix-based.
+
+EXAMPLE:
+    Querying `show run` can match:
+        show running-config
+        show running-config all
+
+OUTPUT BOUNDARY RULE:
+    Once a command match is found, output continues until the same prompt token
+    appears again at column 0 later in the file.
+
+DO NOT CASUALLY CHANGE:
+    - prompt must stay at column 0
+    - same-prompt boundary behavior
+    - zero-or-one-space support after the prompt
+    - case-insensitive prefix-based command extraction
+
+
+===============================================================================
+6. MODIFIER INTENT
+===============================================================================
+
+The modifiers are important because they let the user shape output into forms
+that normalize well in notes mode.
+
+%  MATCHED SUBSTRING ONLY
+    Purpose:
+        Strip matching lines down to just the matched regex text.
+
+    Why it exists:
+        Real outputs often have useful data followed by noisy counters or
+        trailing text. `%` helps normalize those lines so similar devices group
+        more cleanly under `-n`.
+
+    Example:
+        `Trap logging: level informational, 73 message lines logged`
+        becomes:
+        `Trap logging: level informational`
+
++  ALL MATCHING COMMANDS
+    Purpose:
+        Instead of taking the first prompt-delimited command match only, process
+        every prompt-delimited command whose command text matches the query
+        prefix.
+
+    Why it exists:
+        `show run` is often shorthand for both `show running-config` and
+        `show running-config all`. `+` lets the user intentionally widen that.
+
+@  PARENT + MATCHED CHILDREN ONLY
+    Purpose:
+        Narrow block-aware output so that child matches do not drag along every
+        sibling line in the block.
+
+    Why it exists:
+        Plain `-Q` is great for full context, but sometimes it is too noisy.
+        `@` gives an in-between mode:
+            parent matched -> full block
+            child matched -> parent + matching child lines only
+
+    Scope:
+        `@` is `-Q` only.
+
+/  CASE-SENSITIVE PATTERN MATCHING
+    Purpose:
+        Make the grep/block pattern case-sensitive for that query only.
+
+    Why it exists:
+        Sometimes the only reliable way to separate similar lines is case.
+
+    Important:
+        `/` only changes pattern matching.
+        It does NOT make command extraction case-sensitive.
+
+
+===============================================================================
+7. HIGH-LEVEL DATA FLOW
+===============================================================================
+
+The runtime flow is:
+
+    argparse
+        ->
+    query parsing / validation
+        ->
+    file expansion
+        ->
+    command extraction
+        ->
+    filtering
+        ->
+    rendering
+
+MORE CONCRETELY:
+    1. argparse parses `-q`, `-Q`, `-A`, `-r`, `-n`, `-o`, and file patterns
+    2. `collect_ordered_query_specs()` rebuilds queries in original CLI order
+    3. file globs expand through `expand_file_patterns()`
+    4. each query is executed by `process_query()`
+    5. `extract_command()` or `extract_commands()` finds the prompt-delimited
+       command output
+    6. grep / block helpers shape the output
+    7. main() prints bannered output, raw output, or notes mode output
+
+MULTI-QUERY ORDERING:
+    Mixed `-q` and `-Q` queries are executed in the order typed on the CLI.
+
+AND MODE:
+    `-A` is applied after per-query output has been rendered for a file.
+    If any query returns empty content, that file is suppressed.
+
+
+===============================================================================
+8. FUNCTION MAP
+===============================================================================
+
+print_banner(filename)
+    Prints the yellow per-file banner used in normal mode.
+
+extract_commands(file_path, command)
+    Core extractor for all prompt-delimited matches of a command prefix.
+    Returns a list of CommandMatch objects.
+    This is the engine behind `+`.
+
+extract_command(file_path, command)
+    Thin wrapper over `extract_commands()` that returns only the first match.
+
+get_regex_flags(modifiers)
+    Chooses regex flags for filtering.
+    Default is case-insensitive.
+    `/` removes `re.IGNORECASE`.
+
+grep_output(output, grep_pattern, regex_flags)
+    Standard line-based grep behavior.
+    Returns whole matching lines only.
+
+grep_output_matches_only(output, grep_pattern, regex_flags)
+    `%` helper for line mode.
+    Returns only the first matched substring per matching line.
+
+_trim_match(line, grep_pattern, regex_flags)
+    Internal helper used when block-mode matched lines must be trimmed.
+
+grep_output_with_blocks(output, grep_pattern, regex_flags)
+    Classic block-aware filter.
+    Returns full parent/child blocks containing a match.
+
+grep_output_with_blocks_selective(...)
+    Richer block helper for `@` and `%` in block mode.
+    Handles:
+        - full blocks
+        - parent + matched child lines only
+        - trimming matching lines to matched substring only
+
+expand_file_patterns(patterns)
+    Expands globs and direct paths, preserves order, and de-duplicates.
+
+parse_query(query_string)
+    Splits a query into `command` and `pattern` on the first colon only.
+
+parse_q_query(query_string)
+    Validates and parses `-q` queries, including symbolic modifiers.
+
+parse_query_block(query_string)
+    Validates and parses `-Q` queries, including `@`.
+
+collect_ordered_query_specs(argv)
+    Reconstructs the mixed `-q` / `-Q` list in CLI order.
+
+process_query(file_path, query_spec)
+    Runs one parsed query against one file.
+    It is the main execution brain:
+        extract
+        filter
+        join multi-command results
+
+get_query_results(file_path, all_queries)
+    Runs every query for one file and preserves order.
+
+get_file_output(file_path, args, all_queries)
+    Builds the final combined output string for one file.
+    Notes mode depends on this exact rendered output for deduplication.
+
+print_unique_banner(index, total, match_count)
+    Prints the notes-mode banner:
+        <<< Unique Output 1 of 3 | matched 2 times >>>
+
+build_notes_report(notes_collected)
+    Builds the final NOTES REPORT block as text.
+
+validate_output_file_path(output_file_path)
+    Preflight validation for `-n -o`.
+    This exists specifically so bad paths fail before the user spends time
+    entering notes.
+
+main()
+    argparse, validation, file expansion, notes mode, raw mode, and normal mode
+    live here.
+
+
+===============================================================================
+9. INTENTIONAL BEHAVIORS THAT SHOULD NOT BE "CLEANED UP"
+===============================================================================
+
+This section is here because these behaviors might look odd at a glance, but
+they are intentional and user-driven.
+
+1. `show run` PREFIX-MATCHES MULTIPLE REAL COMMANDS
+    This is not a bug.
+    Without `+`, the first prompt-delimited match wins.
+    With `+`, all prompt-delimited matches are processed in file order.
+
+2. INDENTED COMMAND TEXT SHOULD NOT COUNT AS A NEW COMMAND
+    The parser is supposed to ignore command-looking lines inside `show history`
+    and similar output.
+
+3. `@` IS `-Q` ONLY
+    This is by design because `@` only makes sense when a parent/child block
+    model exists.
+
+4. `/` ONLY CHANGES FILTER MATCHING
+    It should not change how prompt-delimited command extraction works.
+
+5. `-n` DEDUPES ON FINAL RENDERED OUTPUT
+    Notes mode groups files by the actual final rendered string from
+    `get_file_output()`, not by intermediate command output.
+    This is why output-shaping modifiers matter so much for good notes grouping.
+
+6. NOTES MODE CTRL+C IS QUIET
+    Ctrl+C during `Notes:` should:
+        - avoid a traceback
+        - print a newline so the shell prompt is clean
+        - avoid printing a notes report
+        - exit quietly
+
+7. `-o` IS NOTES-ONLY AND PREFLIGHT-VALIDATED
+    A bad `-o` path should fail before notes entry begins.
+    This protects the user from losing time on a typo.
+
+8. RAW MODE PREFIXES NON-EMPTY LINES ONLY
+    Empty lines are skipped in raw mode.
+
+9. BANNERED MODE PRINTS QUERY RESULTS IN CLI ORDER
+    Multiple queries are separated by a dashed divider.
+
+
+===============================================================================
+10. FIXTURE STRATEGY
+===============================================================================
+
+The fixture library is now part of both regression and demo quality.
+
+CURRENT FIXTURE SHAPE:
+    `test1/data` contains:
+        5 rich Cisco IOS / IOS XE captures
+        1 NX-OS prompt-spacing capture
+
+WHY THE FIXTURES ARE RICH NOW:
+    The fixture set was intentionally expanded so demos can show:
+        - prompt-delimited extraction
+        - `show run` prefix matching
+        - `+` multi-command behavior
+        - `%` normalization
+        - `@` selective block output
+        - `/` case-sensitive filtering
+        - notes mode grouping on meaningful output
+
+FIXTURE EXPECTATION:
+    Every IOS demo file contains at least 20 prompt-delimited `show` commands.
+
+IMPORTANT:
+    The fixture contents are not random sample text anymore.
+    They are part of the product story and test baseline.
+    If you change them, revisit:
+        - exact-output tests
+        - notes-mode grouping expectations
+        - demo commands in REGRESSION_CHECKLIST.md
+
+
+===============================================================================
+11. REGRESSION WORKFLOW
+===============================================================================
+
+TEST FILE:
+    `tests/test_showparse.py`
+
+MAIN TEST COMMAND:
+    python3 -m unittest discover -s /tools/showparse/tests -v
+
+WHAT THE SUITE COVERS:
+    - command extraction
+    - NX-OS single-space prompt support
+    - rejection of bad prompt shapes
+    - grep helpers
+    - block helpers
+    - modifier parsing
+    - mixed query ordering
+    - notes mode
+    - `-o` behavior
+    - CLI help output
+    - fixture integrity
+
+MANUAL SMOKE CHECKS:
+    See `REGRESSION_CHECKLIST.md`.
+
+WHEN CHANGING USER-VISIBLE BEHAVIOR:
+    Update these together when appropriate:
+        - showparse.py
+        - tests/test_showparse.py
+        - SHOWPARSE_CODE_GUIDE.txt
+        - REGRESSION_CHECKLIST.md
+
+GOOD WORKFLOW:
+    1. Change code
+    2. Update tests
+    3. Run suite
+    4. Run a few smoke commands from the checklist
+    5. Update docs/help if behavior changed
+
+
+===============================================================================
+12. SAFE CHANGE CHECKLIST
+===============================================================================
+
+IF ADDING A NEW MODIFIER:
+    - keep it symbolic, not letter-based
+    - update the allowed modifier sets
+    - update query validation
+    - update help output in main()
+    - update this guide
+    - update REGRESSION_CHECKLIST.md
+    - add targeted core tests and CLI tests
+
+IF CHANGING COMMAND EXTRACTION:
+    - preserve column-0 prompt matching unless intentionally redesigning it
+    - preserve same-prompt output boundary behavior unless intentionally redesigning it
+    - preserve zero-or-one-space prompt support unless intentionally redesigning it
+    - verify `show history` / indented command text still does not create false positives
+    - verify NX-OS spacing still works
+
+IF CHANGING BLOCK LOGIC:
+    - verify full-block mode still works
+    - verify `@` still behaves as:
+        parent matched -> full block
+        child matched -> parent + matched children only
+    - verify `%` trimming in block mode still only trims matched lines
+
+IF CHANGING NOTES MODE:
+    - preserve grouping by final rendered output unless intentionally redesigning it
+    - preserve header format unless intentionally changing it
+    - preserve quiet Ctrl+C handling unless intentionally redesigning it
+    - preserve `-o` preflight validation unless intentionally redesigning it
+
+IF CHANGING FIXTURES:
+    - keep the IOS demo story strong
+    - keep the NX-OS spacing fixture intact unless intentionally redesigning extraction support
+    - re-check exact-output tests and notes grouping
+    - re-check demo commands in the checklist
+
+IF CHANGING CLI HELP:
+    - keep the `Modifiers:` section
+    - keep examples brief but representative
+    - make sure removed legacy flags do not reappear
+
+
+===============================================================================
+13. QUICK REFERENCE: WHERE TO MODIFY
+===============================================================================
+
+CHANGE COMMAND DETECTION:
+    -> extract_commands()
+    -> extract_command()
+
+CHANGE SIMPLE QUERY FILTERING:
+    -> grep_output()
+
+CHANGE MATCHED-SUBSTRING OUTPUT:
+    -> grep_output_matches_only()
+    -> _trim_match()
+
+CHANGE BLOCK DETECTION / BLOCK OUTPUT:
+    -> grep_output_with_blocks()
+    -> grep_output_with_blocks_selective()
+
+CHANGE QUERY STRING SYNTAX:
+    -> parse_query()
+    -> parse_q_query()
+    -> parse_query_block()
+
+CHANGE QUERY EXECUTION RULES:
+    -> process_query()
+    -> get_query_results()
+    -> get_file_output()
+
+ADD OR CHANGE A CLI FLAG:
+    -> main()
+
+ADD OR CHANGE A MODIFIER:
+    -> DEFINED_Q_MODIFIERS
+    -> DEFINED_Q_BLOCK_MODIFIERS
+    -> parse_q_query()
+    -> parse_query_block()
+    -> process_query()
+    -> help epilog in main()
+
+CHANGE NOTES MODE:
+    -> print_unique_banner()
+    -> build_notes_report()
+    -> validate_output_file_path()
+    -> main()
+
+CHANGE FILE EXPANSION:
+    -> expand_file_patterns()
+
+FIRST FILES A FUTURE AGENT SHOULD READ:
+    1. SHOWPARSE_CODE_GUIDE.txt
+    2. showparse.py
+    3. tests/test_showparse.py
+    4. REGRESSION_CHECKLIST.md
+
+
+===============================================================================
+                              END OF GUIDE
+===============================================================================
