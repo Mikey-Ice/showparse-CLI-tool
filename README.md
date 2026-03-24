@@ -13,6 +13,7 @@ Standard query mode:
 python3 showparse.py -q "show version" test1/data/*.dat
 python3 showparse.py -q "show run:hostname|username|logging host" test1/data/*.dat
 python3 showparse.py -q "%:show logging:Trap logging: level \\w+" test1/data/*.dat
+python3 showparse.py -q "#:show version" test1/data/*.dat
 ```
 
 Block query mode:
@@ -21,6 +22,7 @@ Block query mode:
 python3 showparse.py -Q "show run:shutdown" test1/data/*.dat
 python3 showparse.py -Q "@:show run:switchport mode access|shutdown" test1/data/*.dat
 python3 showparse.py -Q "/@:show run:Shutdown|switchport mode access" test1/data/*.dat
+python3 showparse.py -Q "#@%:show run:switchport mode access|shutdown" test1/data/*.dat
 ```
 
 Notes mode:
@@ -42,9 +44,12 @@ python3 showparse.py -q "show version" -n -o /tmp/showparse-notes.txt test1/data
 ## Query Modifiers
 
 - `%` matched substring only
+- `#` count non-empty rendered lines after all other modifiers finish
 - `+` all matching prompt-delimited commands for that query
 - `@` parent + matched child lines only (`-Q` only)
 - `/` case-sensitive pattern matching
+
+Note: keep queries containing `#` quoted so your shell does not treat `#` as a comment character.
 
 ## Testing
 

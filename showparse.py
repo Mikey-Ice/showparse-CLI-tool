@@ -26,11 +26,12 @@ import glob
 import sys
 import os
 import re
+import shlex
 from dataclasses import dataclass
 
 
-DEFINED_Q_MODIFIERS = {'%', '+', '/'}
-DEFINED_Q_BLOCK_MODIFIERS = {'%', '+', '@', '/'}
+DEFINED_Q_MODIFIERS = {'%', '+', '/', '#'}
+DEFINED_Q_BLOCK_MODIFIERS = {'%', '+', '@', '/', '#'}
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,13 @@ def _trim_match(line, grep_pattern, regex_flags=re.IGNORECASE):
     if match:
         return match.group(0)
     return line
+
+
+def count_non_empty_lines(output):
+    """Return the number of non-empty rendered lines, or empty string when no output remains."""
+    if not output.strip():
+        return ""
+    return str(sum(1 for line in output.splitlines() if line.strip()))
 
 
 def grep_output_with_blocks(output, grep_pattern, regex_flags=re.IGNORECASE):
@@ -534,7 +542,12 @@ def process_query(file_path, query_spec):
         else:
             processed_outputs.append(command_output)
 
-    return '\n\n'.join(processed_outputs)
+    rendered_output = '\n\n'.join(processed_outputs)
+
+    if '#' in query_spec.modifiers:
+        return count_non_empty_lines(rendered_output)
+
+    return rendered_output
 
 
 def get_query_results(file_path, all_queries):
@@ -570,15 +583,48 @@ def print_unique_banner(index, total, match_count):
     print(f"\n{dashes}{banner_text}{dashes}\n")
 
 
-def build_notes_report(notes_collected):
+def build_notes_report(notes_collected, command_summary):
     """Build the final notes report text."""
     report_lines = [
         "=" * 70,
         "NOTES REPORT",
         "=" * 70,
+        f"Command: {command_summary}",
+        "",
     ]
     report_lines.extend(f"{filename}:{note}" for filename, note in sorted(notes_collected))
     return "\n" + "\n".join(report_lines) + "\n"
+
+
+def build_notes_command_summary(argv):
+    """Build a compact, reproducible showparse command summary for notes reports."""
+    retained_tokens = ["showparse"]
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        if arg in ("-q", "--query", "-Q", "--query-block"):
+            retained_tokens.append(arg)
+            if i + 1 < len(argv):
+                retained_tokens.append(argv[i + 1])
+                i += 2
+                continue
+        elif arg.startswith("--query=") or arg.startswith("--query-block="):
+            retained_tokens.append(arg)
+        elif arg in ("-A", "--and", "-r", "--raw"):
+            retained_tokens.append(arg)
+        elif arg in ("-n", "--notes"):
+            pass
+        elif arg in ("-o", "--output-file"):
+            if i + 1 < len(argv):
+                i += 2
+                continue
+        elif arg.startswith("--output-file="):
+            pass
+
+        i += 1
+
+    return shlex.join(retained_tokens)
 
 
 def validate_output_file_path(output_file_path):
@@ -601,12 +647,14 @@ def main():
         description='Extract command output from network device collection files (prompt-based parsing)',
         epilog='''Modifiers:
   %    matched text only (-q, -Q)
+  #    count non-empty rendered lines (-q, -Q)
   /    case-sensitive pattern matching (-q, -Q)
   +    all matching commands for this query (-q, -Q)
   @    parent + matched child lines only (-Q only)
 
 Examples:
   showparse -q "show version" *.dat
+  showparse -q "#:show version" *.dat
   showparse -Q "@%:show run:switchport mode access|shutdown" *.dat''',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -730,7 +778,8 @@ Examples:
         if notes_interrupted:
             return
         if notes_collected:
-            report_text = build_notes_report(notes_collected)
+            command_summary = build_notes_command_summary(sys.argv[1:])
+            report_text = build_notes_report(notes_collected, command_summary)
             if args.output_file:
                 try:
                     with open(args.output_file, 'w') as output_file:

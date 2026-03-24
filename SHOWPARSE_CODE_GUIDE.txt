@@ -54,6 +54,7 @@ CURRENT STABLE CLI FLAGS:
 
 CURRENT MODIFIERS:
     %    matched substring only
+    #    count non-empty rendered lines after all other modifiers
     +    all prompt-delimited command matches for that query
     @    parent + matched child lines only (-Q only)
     /    case-sensitive pattern matching
@@ -121,6 +122,10 @@ STANDARD QUERY MODE:
         Extract command output and return only the matched substring from each
         matching line
 
+    -q "#:show version"
+        Extract command output normally, then replace it with the number of
+        non-empty lines that would have been displayed
+
     -q "+:show run:hostname|username|logging host"
         Run the query against every prompt-delimited command that matches the
         command prefix
@@ -150,7 +155,8 @@ OUTPUT FLAGS:
 
     -o PATH
         Notes mode only. Save the final NOTES REPORT block to a file instead of
-        printing it to stdout.
+        printing it to stdout. The report includes a compact `Command:` line
+        showing reusable showparse syntax, not file targets or notes/save flags.
 
 REMOVED V2 FLAGS:
     -c, -g, -G
@@ -197,10 +203,10 @@ EXAMPLES:
 
 MODIFIER COMPATIBILITY:
     -q supports:
-        %  +  /
+        %  #  +  /
 
     -Q supports:
-        %  +  @  /
+        %  #  +  @  /
 
 VALIDATION RULES:
     - `@` is rejected on -q
@@ -284,6 +290,21 @@ that normalize well in notes mode.
         `Trap logging: level informational, 73 message lines logged`
         becomes:
         `Trap logging: level informational`
+
+#  LINE COUNT
+    Purpose:
+        Replace successful rendered output with the number of non-empty lines
+        that would have been displayed.
+
+    Why it exists:
+        Sometimes the user wants a quick volume check rather than the actual
+        content. `#` provides a field-friendly `wc -l` style result while still
+        honoring showparse's prompt-delimited extraction and filtering rules.
+
+    Important:
+        `#` runs after all other output shaping for that query.
+        It does not count blank separator lines.
+        It does not convert command-not-found messages into counts.
 
 +  ALL MATCHING COMMANDS
     Purpose:
@@ -385,6 +406,11 @@ grep_output_matches_only(output, grep_pattern, regex_flags)
     `%` helper for line mode.
     Returns only the first matched substring per matching line.
 
+count_non_empty_lines(output)
+    `#` helper.
+    Returns the number of non-empty rendered lines, or empty string if no
+    content remains after filtering.
+
 _trim_match(line, grep_pattern, regex_flags)
     Internal helper used when block-mode matched lines must be trimmed.
 
@@ -433,7 +459,12 @@ print_unique_banner(index, total, match_count)
         <<< Unique Output 1 of 3 | matched 2 times >>>
 
 build_notes_report(notes_collected)
-    Builds the final NOTES REPORT block as text.
+    Builds the final NOTES REPORT block as text, including the compact
+    `Command:` summary line used for provenance.
+
+build_notes_command_summary(argv)
+    Reconstructs the reusable showparse syntax for the notes report.
+    Keeps query/output-shaping flags, omits `-n`, `-o`, and file targets.
 
 validate_output_file_path(output_file_path)
     Preflight validation for `-n -o`.
@@ -484,10 +515,16 @@ they are intentional and user-driven.
     A bad `-o` path should fail before notes entry begins.
     This protects the user from losing time on a typo.
 
-8. RAW MODE PREFIXES NON-EMPTY LINES ONLY
+8. NOTES REPORTS INCLUDE A COMPACT `Command:` LINE
+    The final NOTES REPORT block includes a compact showparse syntax summary.
+    It keeps query/output-shaping flags that affect the rendered content, but
+    intentionally omits `-n`, `-o`, and file targets so the report stays
+    focused on the parsing recipe.
+
+9. RAW MODE PREFIXES NON-EMPTY LINES ONLY
     Empty lines are skipped in raw mode.
 
-9. BANNERED MODE PRINTS QUERY RESULTS IN CLI ORDER
+10. BANNERED MODE PRINTS QUERY RESULTS IN CLI ORDER
     Multiple queries are separated by a dashed divider.
 
 
@@ -540,6 +577,7 @@ WHAT THE SUITE COVERS:
     - rejection of bad prompt shapes
     - grep helpers
     - block helpers
+    - `#` rendered line counting
     - modifier parsing
     - mixed query ordering
     - notes mode
@@ -573,6 +611,7 @@ IF ADDING A NEW MODIFIER:
     - keep it symbolic, not letter-based
     - update the allowed modifier sets
     - update query validation
+    - decide whether it runs before or after final rendering
     - update help output in main()
     - update this guide
     - update REGRESSION_CHECKLIST.md
@@ -595,6 +634,7 @@ IF CHANGING BLOCK LOGIC:
 IF CHANGING NOTES MODE:
     - preserve grouping by final rendered output unless intentionally redesigning it
     - preserve header format unless intentionally changing it
+    - preserve compact `Command:` provenance behavior unless intentionally redesigning it
     - preserve quiet Ctrl+C handling unless intentionally redesigning it
     - preserve `-o` preflight validation unless intentionally redesigning it
 
@@ -625,6 +665,10 @@ CHANGE MATCHED-SUBSTRING OUTPUT:
     -> grep_output_matches_only()
     -> _trim_match()
 
+CHANGE LINE-COUNT OUTPUT:
+    -> count_non_empty_lines()
+    -> process_query()
+
 CHANGE BLOCK DETECTION / BLOCK OUTPUT:
     -> grep_output_with_blocks()
     -> grep_output_with_blocks_selective()
@@ -647,12 +691,14 @@ ADD OR CHANGE A MODIFIER:
     -> DEFINED_Q_BLOCK_MODIFIERS
     -> parse_q_query()
     -> parse_query_block()
+    -> count_non_empty_lines()
     -> process_query()
     -> help epilog in main()
 
 CHANGE NOTES MODE:
     -> print_unique_banner()
     -> build_notes_report()
+    -> build_notes_command_summary()
     -> validate_output_file_path()
     -> main()
 
