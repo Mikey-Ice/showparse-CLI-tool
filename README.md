@@ -32,6 +32,9 @@ python3 showparse.py -q "show version" -n test1/data/*.dat
 python3 showparse.py -q "show version" -n -o /tmp/showparse-notes.txt test1/data/*.dat
 ```
 
+During the notes-mode compile/dedupe phase, showparse writes a live
+`(completed/total)` progress counter to `stderr`.
+
 ## Current CLI Surface
 
 - `-q` standard query mode
@@ -63,3 +66,17 @@ See also:
 
 - `SHOWPARSE_CODE_GUIDE.txt` for the canonical future-session handoff and code guide
 - `REGRESSION_CHECKLIST.md` for smoke-test commands
+
+## Large Practice Fixtures
+
+The fast regression fixtures live in `test1/data`. If you want realistic
+large-file parsing practice without touching that baseline, generate the
+separate large fixtures in `test1/data_large`:
+
+```bash
+python3 generate_large_fixtures.py
+```
+
+By default this creates large Cisco-style practice captures at about
+`4,000,000` bytes each while preserving the original sample fixture content in
+the middle of each file.

@@ -511,6 +511,24 @@ they are intentional and user-driven.
         - avoid printing a notes report
         - exit quietly
 
+6b. NORMAL AND RAW OUTPUT CTRL+C ARE QUIET TOO
+    Ctrl+C during non-notes output rendering should:
+        - avoid a traceback
+        - avoid explanatory error text
+        - print a newline so the shell prompt is clean
+        - exit with status 130
+
+6a. NOTES MODE SHOWS PHASE-1 PROGRESS ON STDERR
+    During the pre-review file-processing pass, notes mode prints a live
+    `(completed/total)` counter to stderr only.
+
+    Why stderr:
+        It keeps stdout clean for:
+            - unique output banners
+            - rendered notes-review content
+            - `Notes:` prompts
+            - the final notes report
+
 7. `-o` IS NOTES-ONLY AND PREFLIGHT-VALIDATED
     A bad `-o` path should fail before notes entry begins.
     This protects the user from losing time on a typo.
@@ -538,6 +556,20 @@ CURRENT FIXTURE SHAPE:
     `test1/data` contains:
         5 rich Cisco IOS / IOS XE captures
         1 NX-OS prompt-spacing capture
+
+OPTIONAL LARGE PRACTICE FIXTURES:
+    `test1/data_large` is the separate large-fixture playground.
+    It is generated from the small fixtures by:
+        `python3 /tools/showparse/generate_large_fixtures.py`
+
+    Default target:
+        about 4,000,000 bytes per file
+
+    Design intent:
+        - keep the fast regression fixtures small and stable
+        - preserve the original sample fixture content inside each large file
+        - add realistic collector chatter plus extra Cisco-style `show`
+          command output instead of meaningless byte padding
 
 WHY THE FIXTURES ARE RICH NOW:
     The fixture set was intentionally expanded so demos can show:
@@ -567,6 +599,7 @@ IMPORTANT:
 
 TEST FILE:
     `tests/test_showparse.py`
+    `tests/test_large_fixture_generator.py`
 
 MAIN TEST COMMAND:
     python3 -m unittest discover -s /tools/showparse/tests -v
@@ -584,6 +617,7 @@ WHAT THE SUITE COVERS:
     - `-o` behavior
     - CLI help output
     - fixture integrity
+    - large-fixture generator sizing and prompt preservation
 
 MANUAL SMOKE CHECKS:
     See `REGRESSION_CHECKLIST.md`.
@@ -643,6 +677,12 @@ IF CHANGING FIXTURES:
     - keep the NX-OS spacing fixture intact unless intentionally redesigning extraction support
     - re-check exact-output tests and notes grouping
     - re-check demo commands in the checklist
+
+IF CHANGING LARGE PRACTICE FIXTURES:
+    - treat `generate_large_fixtures.py` as the source of truth, not manual edits
+    - keep large fixtures in `test1/data_large`, separate from `test1/data`
+    - avoid synthetic prompt lines that would accidentally change command boundaries
+    - preserve the original small fixture body inside the generated large file
 
 IF CHANGING CLI HELP:
     - keep the `Modifiers:` section

@@ -642,6 +642,11 @@ def validate_output_file_path(output_file_path):
     return None
 
 
+def print_notes_progress(completed, total):
+    """Render notes-mode phase-1 progress to stderr on a single live line."""
+    print(f"\r({completed}/{total})", end="", file=sys.stderr, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Extract command output from network device collection files (prompt-based parsing)',
@@ -736,10 +741,14 @@ Examples:
     if args.notes:
         # Phase 1: Collect all outputs and group by unique content
         output_groups = {}  # {output_content: [filenames]}
-        for file_path in sorted(files):
+        total_files = len(files)
+        for completed, file_path in enumerate(sorted(files), 1):
             filename = os.path.basename(file_path)
             output = get_file_output(file_path, args, all_queries)
             output_groups.setdefault(output, []).append(filename)
+            print_notes_progress(completed, total_files)
+
+        print(file=sys.stderr)
         
         # Phase 2: Present each unique output and collect notes
         notes_collected = []
@@ -795,35 +804,39 @@ Examples:
     
     else:
         # Normal mode (not notes): process and display each file
-        for file_path in sorted(files):
-            filename = os.path.basename(file_path)
+        try:
+            for file_path in sorted(files):
+                filename = os.path.basename(file_path)
 
-            query_results = get_query_results(file_path, all_queries)
+                query_results = get_query_results(file_path, all_queries)
 
-            # AND mode: skip files where any query returned empty
-            if args.and_mode and any(not result.strip() for result in query_results):
-                continue
+                # AND mode: skip files where any query returned empty
+                if args.and_mode and any(not result.strip() for result in query_results):
+                    continue
 
+                if not args.raw:
+                    print_banner(file_path)
+
+                for i, output in enumerate(query_results):
+                    if args.raw:
+                        # Raw mode: prefix each line with filename (no separators)
+                        for line in output.split('\n'):
+                            if line.strip():  # Skip empty lines
+                                print(f"{filename}:{line}")
+                    else:
+                        print(output)
+                        # Add visual separator between queries (but not after the last one)
+                        if i < len(query_results) - 1:
+                            print()
+                            print("-" * 40)
+                            print()
+            
+            # Add a newline at the end for cleaner output (not in raw mode)
             if not args.raw:
-                print_banner(file_path)
-
-            for i, output in enumerate(query_results):
-                if args.raw:
-                    # Raw mode: prefix each line with filename (no separators)
-                    for line in output.split('\n'):
-                        if line.strip():  # Skip empty lines
-                            print(f"{filename}:{line}")
-                else:
-                    print(output)
-                    # Add visual separator between queries (but not after the last one)
-                    if i < len(query_results) - 1:
-                        print()
-                        print("-" * 40)
-                        print()
-        
-        # Add a newline at the end for cleaner output (not in raw mode)
-        if not args.raw:
+                print()
+        except KeyboardInterrupt:
             print()
+            sys.exit(130)
 
 
 if __name__ == '__main__':
