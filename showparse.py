@@ -30,8 +30,8 @@ import shlex
 from dataclasses import dataclass
 
 
-DEFINED_Q_MODIFIERS = {'%', '+', '/', '#'}
-DEFINED_Q_BLOCK_MODIFIERS = {'%', '+', '@', '/', '#'}
+DEFINED_Q_MODIFIERS = {'%', '+', '/', '#', '~'}
+DEFINED_Q_BLOCK_MODIFIERS = {'%', '+', '@', '/', '#', '~'}
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,45 @@ def print_banner(filename):
     print(f"\n\033[33m{banner_line}\033[0m\n")
 
 
+def _read_file_content(file_path):
+    """Read and return file content, or an error tuple on failure."""
+    try:
+        with open(file_path, 'r') as f:
+            return f.read()
+    except IOError as e:
+        return (None, f"Error reading file: {e}")
+
+
+def _get_command_pattern(command):
+    """Return the prompt-delimited regex used for command extraction."""
+    return rf"^(\S*[#>$%])( ?{re.escape(command)}[^\n]*)"
+
+
+def _build_command_match(content, match):
+    """Build a CommandMatch from one prompt-delimited regex match."""
+    prompt = match.group(1)  # e.g., "Router1#"
+    command_line = match.group(2)  # e.g., "show running-config"
+    command_header = prompt + command_line  # Full line: "Router1#show running-config"
+
+    output_start = match.end()
+
+    # Output ends at the next occurrence of the same prompt at start of line.
+    end_pattern = rf"^{re.escape(prompt)}"
+    end_match = re.search(end_pattern, content[output_start:], re.MULTILINE)
+
+    if end_match:
+        command_output = content[output_start:output_start + end_match.start()].strip()
+    else:
+        command_output = content[output_start:].strip()
+
+    return CommandMatch(header=command_header, output=command_output)
+
+
+def _render_matched_command_header(command_header):
+    """Return the matched command line without the device prompt token."""
+    return re.sub(r"^\S*[#>$%] ?", "", command_header, count=1)
+
+
 def extract_commands(file_path, command):
     """
     Extract all outputs for commands matching a prefix from a .dat file.
@@ -82,42 +121,21 @@ def extract_commands(file_path, command):
     
     Returns a list of CommandMatch objects, or (None, error_message) if not found.
     """
-    try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-    except IOError as e:
-        return (None, f"Error reading file: {e}")
+    content = _read_file_content(file_path)
+    if isinstance(content, tuple):
+        return content
     
     # Match prompt + command at start of line, allowing IOS-style "promptcmd"
     # and NX-OS-style "prompt cmd" but not multiple spaces or indentation.
     # Restrict prompt tokens to common prompt-ending characters so metadata
     # lines like "!Command:" are not treated as device prompts.
-    pattern = rf"^(\S*[#>$%])( ?{re.escape(command)}[^\n]*)"
+    pattern = _get_command_pattern(command)
     matches = list(re.finditer(pattern, content, re.MULTILINE | re.IGNORECASE))
 
     if not matches:
         return (None, f"Command '{command}' not found in file.")
 
-    command_matches = []
-    for match in matches:
-        prompt = match.group(1)  # e.g., "Router1#"
-        command_line = match.group(2)  # e.g., "show running-config"
-        command_header = prompt + command_line  # Full line: "Router1#show running-config"
-
-        output_start = match.end()
-
-        # Output ends at the next occurrence of the same prompt at start of line.
-        end_pattern = rf"^{re.escape(prompt)}"
-        end_match = re.search(end_pattern, content[output_start:], re.MULTILINE)
-
-        if end_match:
-            command_output = content[output_start:output_start + end_match.start()].strip()
-        else:
-            command_output = content[output_start:].strip()
-
-        command_matches.append(CommandMatch(header=command_header, output=command_output))
-
-    return command_matches
+    return [_build_command_match(content, match) for match in matches]
 
 
 def extract_command(file_path, command):
@@ -126,12 +144,16 @@ def extract_command(file_path, command):
 
     Returns tuple of (command_header, command_output) or (None, error_message) if not found.
     """
-    result = extract_commands(file_path, command)
+    content = _read_file_content(file_path)
+    if isinstance(content, tuple):
+        return content
 
-    if isinstance(result, tuple):
-        return result
+    pattern = _get_command_pattern(command)
+    match = re.search(pattern, content, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return (None, f"Command '{command}' not found in file.")
 
-    first_match = result[0]
+    first_match = _build_command_match(content, match)
     return (first_match.header, first_match.output)
 
 
@@ -509,10 +531,11 @@ def process_query(file_path, query_spec):
     regex_flags = get_regex_flags(query_spec.modifiers)
     for command_match in command_matches:
         command_output = command_match.output
+        rendered_piece = ""
         if query_spec.grep_pattern:
             if query_spec.use_blocks:
                 if '@' in query_spec.modifiers or '%' in query_spec.modifiers:
-                    filtered_output = grep_output_with_blocks_selective(
+                    rendered_piece = grep_output_with_blocks_selective(
                         command_output,
                         query_spec.grep_pattern,
                         matched_children_only='@' in query_spec.modifiers,
@@ -520,27 +543,37 @@ def process_query(file_path, query_spec):
                         regex_flags=regex_flags,
                     )
                 else:
-                    filtered_output = grep_output_with_blocks(
+                    rendered_piece = grep_output_with_blocks(
                         command_output,
                         query_spec.grep_pattern,
                         regex_flags=regex_flags,
                     )
             elif '%' in query_spec.modifiers:
-                filtered_output = grep_output_matches_only(
+                rendered_piece = grep_output_matches_only(
                     command_output,
                     query_spec.grep_pattern,
                     regex_flags=regex_flags,
                 )
             else:
-                filtered_output = grep_output(
+                rendered_piece = grep_output(
                     command_output,
                     query_spec.grep_pattern,
                     regex_flags=regex_flags,
                 )
-            if filtered_output:
-                processed_outputs.append(filtered_output)
         else:
-            processed_outputs.append(command_output)
+            rendered_piece = command_output
+
+        if query_spec.grep_pattern and not rendered_piece:
+            continue
+
+        if '~' in query_spec.modifiers:
+            matched_command = _render_matched_command_header(command_match.header)
+            if rendered_piece:
+                rendered_piece = f"{matched_command}\n{rendered_piece}"
+            else:
+                rendered_piece = matched_command
+
+        processed_outputs.append(rendered_piece)
 
     rendered_output = '\n\n'.join(processed_outputs)
 
@@ -647,11 +680,43 @@ def print_notes_progress(completed, total):
     print(f"\r({completed}/{total})", end="", file=sys.stderr, flush=True)
 
 
+def build_raw_output(filename, query_results):
+    """Render raw-mode output for one file using filename-prefixed non-empty lines."""
+    rendered_lines = []
+    for output in query_results:
+        for line in output.split('\n'):
+            if line.strip():
+                rendered_lines.append(f"{filename}:{line}")
+
+    if not rendered_lines:
+        return ""
+    return '\n'.join(rendered_lines) + '\n'
+
+
+def build_normal_output(file_path, query_results):
+    """Render normal bannered output for one file as a single string."""
+    basename = os.path.basename(file_path)
+    banner_text = f"<<< {basename} >>>"
+    padding = (70 - len(banner_text)) // 2
+    dashes = "-" * padding
+    banner_line = f"{dashes}{banner_text}{dashes}"
+
+    parts = [f"\n\033[33m{banner_line}\033[0m\n\n"]
+    for i, output in enumerate(query_results):
+        parts.append(output)
+        if i < len(query_results) - 1:
+            parts.append("\n\n----------------------------------------\n\n")
+
+    parts.append("\n")
+    return ''.join(parts)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Extract command output from network device collection files (prompt-based parsing)',
         epilog='''Modifiers:
   %    matched text only (-q, -Q)
+  ~    show matched command first (-q, -Q)
   #    count non-empty rendered lines (-q, -Q)
   /    case-sensitive pattern matching (-q, -Q)
   +    all matching commands for this query (-q, -Q)
@@ -659,6 +724,7 @@ def main():
 
 Examples:
   showparse -q "show version" *.dat
+  showparse -q "~:show run:username" *.dat
   showparse -q "#:show version" *.dat
   showparse -Q "@%:show run:switchport mode access|shutdown" *.dat''',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -814,26 +880,14 @@ Examples:
                 if args.and_mode and any(not result.strip() for result in query_results):
                     continue
 
-                if not args.raw:
-                    print_banner(file_path)
-
-                for i, output in enumerate(query_results):
-                    if args.raw:
-                        # Raw mode: prefix each line with filename (no separators)
-                        for line in output.split('\n'):
-                            if line.strip():  # Skip empty lines
-                                print(f"{filename}:{line}")
-                    else:
-                        print(output)
-                        # Add visual separator between queries (but not after the last one)
-                        if i < len(query_results) - 1:
-                            print()
-                            print("-" * 40)
-                            print()
+                if args.raw:
+                    sys.stdout.write(build_raw_output(filename, query_results))
+                else:
+                    sys.stdout.write(build_normal_output(file_path, query_results))
             
             # Add a newline at the end for cleaner output (not in raw mode)
             if not args.raw:
-                print()
+                sys.stdout.write("\n")
         except KeyboardInterrupt:
             print()
             sys.exit(130)

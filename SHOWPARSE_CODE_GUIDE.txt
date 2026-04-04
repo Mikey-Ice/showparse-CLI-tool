@@ -54,6 +54,7 @@ CURRENT STABLE CLI FLAGS:
 
 CURRENT MODIFIERS:
     %    matched substring only
+    ~    show matched command first
     #    count non-empty rendered lines after all other modifiers
     +    all prompt-delimited command matches for that query
     @    parent + matched child lines only (-Q only)
@@ -118,6 +119,9 @@ STANDARD QUERY MODE:
     -q "show run:hostname|username"
         Extract command output and return matching lines only
 
+    -q "~:show run:username"
+        Return the real matched command line first, then the rendered output
+
     -q "%:show logging:Trap logging: level \\w+"
         Extract command output and return only the matched substring from each
         matching line
@@ -137,6 +141,10 @@ BLOCK QUERY MODE:
     -Q "@:show run:switchport mode access|shutdown"
         Return parent + matched child lines only unless the parent itself
         matched
+
+    -Q "~@:show run:switchport mode access|shutdown"
+        Return the real matched command line first, then the selective block
+        output
 
     -Q "%:show run:shutdown"
         Keep full block context but trim matching lines down to the matched
@@ -203,10 +211,10 @@ EXAMPLES:
 
 MODIFIER COMPATIBILITY:
     -q supports:
-        %  #  +  /
+        %  ~  #  +  /
 
     -Q supports:
-        %  #  +  @  /
+        %  ~  #  +  @  /
 
 VALIDATION RULES:
     - `@` is rejected on -q
@@ -214,6 +222,7 @@ VALIDATION RULES:
     - `/` requires a pattern
     - `@` requires a pattern
     - `+` can be used with or without a pattern
+    - `~` can be used with or without a pattern
 
 ORDER RULE:
     Modifier order does not matter.
@@ -305,6 +314,22 @@ that normalize well in notes mode.
         `#` runs after all other output shaping for that query.
         It does not count blank separator lines.
         It does not convert command-not-found messages into counts.
+
+~  SHOW MATCHED COMMAND FIRST
+    Purpose:
+        Prepend the actual matched command line from the file before the
+        rendered output for that command result.
+
+    Why it exists:
+        Prefix queries like `show run` can match different real commands such
+        as `show running-config` and `show running-config all`. `~` makes the
+        source command explicit in the output.
+
+    Important:
+        The injected line removes the device prompt but keeps the real matched
+        command text.
+        With `+`, one command line is injected for each matched command result.
+        `#` counts the injected line because it counts final rendered output.
 
 +  ALL MATCHING COMMANDS
     Purpose:

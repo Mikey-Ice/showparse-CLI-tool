@@ -12,6 +12,7 @@ Standard query mode:
 ```bash
 python3 showparse.py -q "show version" test1/data/*.dat
 python3 showparse.py -q "show run:hostname|username|logging host" test1/data/*.dat
+python3 showparse.py -q "~:show run:username" test1/data/*.dat
 python3 showparse.py -q "%:show logging:Trap logging: level \\w+" test1/data/*.dat
 python3 showparse.py -q "#:show version" test1/data/*.dat
 ```
@@ -20,6 +21,7 @@ Block query mode:
 
 ```bash
 python3 showparse.py -Q "show run:shutdown" test1/data/*.dat
+python3 showparse.py -Q "~@:show run:switchport mode access|shutdown" test1/data/*.dat
 python3 showparse.py -Q "@:show run:switchport mode access|shutdown" test1/data/*.dat
 python3 showparse.py -Q "/@:show run:Shutdown|switchport mode access" test1/data/*.dat
 python3 showparse.py -Q "#@%:show run:switchport mode access|shutdown" test1/data/*.dat
@@ -47,6 +49,7 @@ During the notes-mode compile/dedupe phase, showparse writes a live
 ## Query Modifiers
 
 - `%` matched substring only
+- `~` show matched command first
 - `#` count non-empty rendered lines after all other modifiers finish
 - `+` all matching prompt-delimited commands for that query
 - `@` parent + matched child lines only (`-Q` only)
