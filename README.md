@@ -11,6 +11,8 @@ Standard query mode:
 
 ```bash
 python3 showparse.py -q "show version" test1/data/*.dat
+python3 showparse.py --no-color -q "show version" test1/data/*.dat
+python3 showparse.py --no-banner -q "show version" test1/data/*.dat
 python3 showparse.py -q "show run:hostname|username|logging host" test1/data/*.dat
 python3 showparse.py -q "~:show run:username" test1/data/*.dat
 python3 showparse.py -q "%:show logging:Trap logging: level \\w+" test1/data/*.dat
@@ -43,6 +45,8 @@ During the notes-mode compile/dedupe phase, showparse writes a live
 - `-Q` block-aware query mode
 - `-A` require all queries to return content for a file
 - `-r` raw grep-style output
+- `--no-color` print the per-file filename banner without ANSI color
+- `--no-banner` suppress the per-file filename banner in normal mode
 - `-n` notes mode with deduplication
 - `-o` save the final notes report to a file
 

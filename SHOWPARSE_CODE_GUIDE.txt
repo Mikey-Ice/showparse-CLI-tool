@@ -49,6 +49,8 @@ CURRENT STABLE CLI FLAGS:
     -Q    block-aware query mode
     -A    require all queries to return content for a file
     -r    raw grep-style output
+    --no-color    print the per-file filename banner without ANSI color
+    --no-banner    suppress the per-file filename banner in normal mode
     -n    notes mode with deduplication
     -o    save the final notes report to a file (notes mode only)
 
@@ -156,6 +158,14 @@ OUTPUT FLAGS:
 
     -r
         Raw mode. Prefix each non-empty output line with `filename:`.
+
+    --no-color
+        Normal mode only. Keep the per-file filename banner, but print it as
+        plain text instead of yellow ANSI text.
+
+    --no-banner
+        Normal mode only. Suppress the yellow per-file filename banner.
+        Multiple files are still separated by a blank line.
 
     -n
         Notes mode. Deduplicate identical rendered outputs, review each unique
@@ -386,14 +396,16 @@ The runtime flow is:
     rendering
 
 MORE CONCRETELY:
-    1. argparse parses `-q`, `-Q`, `-A`, `-r`, `-n`, `-o`, and file patterns
+    1. argparse parses `-q`, `-Q`, `-A`, `-r`, `--no-color`, `--no-banner`,
+       `-n`, `-o`, and file patterns
     2. `collect_ordered_query_specs()` rebuilds queries in original CLI order
     3. file globs expand through `expand_file_patterns()`
     4. each query is executed by `process_query()`
     5. `extract_command()` or `extract_commands()` finds the prompt-delimited
        command output
     6. grep / block helpers shape the output
-    7. main() prints bannered output, raw output, or notes mode output
+    7. main() prints bannered output, bannerless normal output, raw output, or
+       notes mode output
 
 MULTI-QUERY ORDERING:
     Mixed `-q` and `-Q` queries are executed in the order typed on the CLI.
@@ -569,6 +581,14 @@ they are intentional and user-driven.
 
 10. BANNERED MODE PRINTS QUERY RESULTS IN CLI ORDER
     Multiple queries are separated by a dashed divider.
+
+11. `--no-color` ONLY CHANGES NORMAL-MODE BANNER STYLING
+    It keeps the banner text but removes the yellow ANSI styling.
+    It does not affect raw mode or notes-mode unique-output banners.
+
+12. `--no-banner` ONLY CHANGES NORMAL-MODE FILE HEADERS
+    It does not affect raw mode or notes-mode unique-output banners.
+    Multiple files are still separated by a blank line.
 
 
 ===============================================================================

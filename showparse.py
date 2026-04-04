@@ -50,8 +50,8 @@ class CommandMatch:
     output: str
 
 
-def print_banner(filename):
-    """Print a banner with the filename in yellow"""
+def print_banner(filename, use_color=True):
+    """Print a banner with the filename, optionally using yellow ANSI color."""
     basename = os.path.basename(filename)
     # Create banner: --------------------<<<filename>>>--------------------
     banner_text = f"<<< {basename} >>>"
@@ -59,8 +59,11 @@ def print_banner(filename):
     padding = (70 - len(banner_text)) // 2
     dashes = "-" * padding
     banner_line = f"{dashes}{banner_text}{dashes}"
-    # ANSI yellow text: \033[33m ... \033[0m (reset)
-    print(f"\n\033[33m{banner_line}\033[0m\n")
+    if use_color:
+        # ANSI yellow text: \033[33m ... \033[0m (reset)
+        print(f"\n\033[33m{banner_line}\033[0m\n")
+    else:
+        print(f"\n{banner_line}\n")
 
 
 def _read_file_content(file_path):
@@ -680,6 +683,29 @@ def print_notes_progress(completed, total):
     print(f"\r({completed}/{total})", end="", file=sys.stderr, flush=True)
 
 
+def exit_quietly_for_broken_pipe():
+    """Exit cleanly when stdout is closed by a downstream pager or pipe consumer."""
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        raise SystemExit(0)
+
+    try:
+        stdout_fd = sys.stdout.fileno()
+    except (AttributeError, OSError):
+        os.close(devnull_fd)
+        raise SystemExit(0)
+
+    try:
+        os.dup2(devnull_fd, stdout_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(devnull_fd)
+
+    raise SystemExit(0)
+
+
 def build_raw_output(filename, query_results):
     """Render raw-mode output for one file using filename-prefixed non-empty lines."""
     rendered_lines = []
@@ -693,15 +719,20 @@ def build_raw_output(filename, query_results):
     return '\n'.join(rendered_lines) + '\n'
 
 
-def build_normal_output(file_path, query_results):
-    """Render normal bannered output for one file as a single string."""
-    basename = os.path.basename(file_path)
-    banner_text = f"<<< {basename} >>>"
-    padding = (70 - len(banner_text)) // 2
-    dashes = "-" * padding
-    banner_line = f"{dashes}{banner_text}{dashes}"
+def build_normal_output(file_path, query_results, show_banner=True, use_color=True):
+    """Render normal-mode output for one file, with optional banner and color."""
+    parts = []
+    if show_banner:
+        basename = os.path.basename(file_path)
+        banner_text = f"<<< {basename} >>>"
+        padding = (70 - len(banner_text)) // 2
+        dashes = "-" * padding
+        banner_line = f"{dashes}{banner_text}{dashes}"
+        if use_color:
+            parts.append(f"\n\033[33m{banner_line}\033[0m\n\n")
+        else:
+            parts.append(f"\n{banner_line}\n\n")
 
-    parts = [f"\n\033[33m{banner_line}\033[0m\n\n"]
     for i, output in enumerate(query_results):
         parts.append(output)
         if i < len(query_results) - 1:
@@ -755,6 +786,16 @@ Examples:
         '-r', '--raw',
         action='store_true',
         help='Raw output mode: no banners, prefix each line with filename (grep-style)'
+    )
+    parser.add_argument(
+        '--no-color',
+        action='store_true',
+        help='Normal mode only: print the per-file filename banner without ANSI color.'
+    )
+    parser.add_argument(
+        '--no-banner',
+        action='store_true',
+        help='Normal mode only: suppress the per-file filename banner.'
     )
     parser.add_argument(
         '-n', '--notes',
@@ -871,6 +912,7 @@ Examples:
     else:
         # Normal mode (not notes): process and display each file
         try:
+            wrote_normal_output = False
             for file_path in sorted(files):
                 filename = os.path.basename(file_path)
 
@@ -883,11 +925,23 @@ Examples:
                 if args.raw:
                     sys.stdout.write(build_raw_output(filename, query_results))
                 else:
-                    sys.stdout.write(build_normal_output(file_path, query_results))
+                    if args.no_banner and wrote_normal_output:
+                        sys.stdout.write("\n")
+                    sys.stdout.write(
+                        build_normal_output(
+                            file_path,
+                            query_results,
+                            show_banner=not args.no_banner,
+                            use_color=not args.no_color,
+                        )
+                    )
+                    wrote_normal_output = True
             
             # Add a newline at the end for cleaner output (not in raw mode)
-            if not args.raw:
+            if not args.raw and not args.no_banner:
                 sys.stdout.write("\n")
+        except BrokenPipeError:
+            exit_quietly_for_broken_pipe()
         except KeyboardInterrupt:
             print()
             sys.exit(130)
