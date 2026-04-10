@@ -1,0 +1,492 @@
+===============================================================================
+         SHOWPARSE_FSM.PY - CODE GUIDE AND FUTURE-SESSION HANDOFF
+===============================================================================
+
+This file is the canonical handoff document for future showparse_fsm sessions.
+
+If a future agent starts with no memory of prior work, the intended bootstrap is:
+1. Read this file first
+2. Read showparse_fsm.py
+3. Read tests/test_showparse_fsm.py
+4. Read SHOWPARSE_CODE_GUIDE.txt for inherited extraction philosophy only
+5. Run the relevant test suite
+
+showparse_fsm is intentionally separate from showparse.py.
+Do not "simplify" the project by folding this logic back into showparse.py
+unless the user explicitly requests that redesign.
+
+
+TABLE OF CONTENTS
+-----------------
+1. READ THIS FIRST
+2. WHAT SHOWPARSE_FSM IS FOR
+3. WHY IT IS A SEPARATE TOOL
+4. STABLE CLI SURFACE
+5. JSON OUTPUT CONTRACT
+6. EXTRACTION INHERITANCE FROM SHOWPARSE
+7. TEXTFSM INTEGRATION MODEL
+8. INTENTIONAL BEHAVIORS THAT SHOULD NOT BE "CLEANED UP"
+9. TESTING WORKFLOW
+10. SAFE CHANGE CHECKLIST
+11. QUICK REFERENCE
+
+
+===============================================================================
+1. READ THIS FIRST
+===============================================================================
+
+SHORT VERSION:
+    showparse_fsm is the structured-data companion to showparse.
+    It keeps prompt-aware bulk extraction, then applies one TextFSM template
+    to the final extracted text for each file and emits JSON.
+
+MOST IMPORTANT PRODUCT RULE:
+    showparse.py stays untouched and remains the human-facing text tool.
+    showparse_fsm.py is where structured parsing evolves.
+
+CURRENT SUPPORTED QUERY FEATURES:
+    -q    standard query mode
+    -Q    block-aware query mode
+    +     all prompt-delimited command matches for that query
+
+CURRENTLY UNSUPPORTED IN SHOWPARSE_FSM:
+    %  ~  #  @  /  -A  -r  -n  -o  --no-color  --no-banner
+
+WHY THE SUPPORTED SET IS SMALL:
+    Those other modifiers and flags exist mainly to improve human readability
+    or interactive workflows. showparse_fsm is file-rooted JSON for later
+    automation, so most display-oriented shaping is unnecessary or harmful.
+
+ONE QUERY / ONE TEMPLATE RULE:
+    V1 allows exactly one query and exactly one template path per run.
+    The bulk dimension is files, not queries.
+
+
+===============================================================================
+2. WHAT SHOWPARSE_FSM IS FOR
+===============================================================================
+
+showparse_fsm exists for this workflow:
+
+    "Extract the real command output from every target collection file,
+     then parse that output into structured fields that later scripts can
+     iterate over by file/device."
+
+This is not meant to replace showparse.
+
+MENTAL MODEL:
+    showparse
+        -> human reads extracted text
+
+    showparse_fsm
+        -> machine reads per-file JSON records
+
+PRODUCT GOAL:
+    Keep the same trustable prompt-delimited extraction behavior across bulk
+    data, but return a JSON structure that makes later scripting simple.
+
+EXPECTED CONSUMER BEHAVIOR:
+    A later script should be able to do:
+        for file_entry in results:
+            inspect file_entry["file"]
+            inspect file_entry["matches"]
+            pull fields like uptime, hostname, serial, interfaces, etc.
+
+
+===============================================================================
+3. WHY IT IS A SEPARATE TOOL
+===============================================================================
+
+This tool was intentionally created as a separate script rather than by
+modifying showparse.py.
+
+WHY:
+    - showparse.py already serves a trusted human-facing role
+    - the user explicitly wanted to preserve that behavior
+    - the structured-data workflow has different output needs
+    - separate tools reduce risk and let each one stay sharp
+
+DESIGN CONSEQUENCE:
+    showparse_fsm.py started from copied extraction/query logic, not from a
+    shared base module refactor. That choice favors safety and independence.
+
+IMPORTANT:
+    Drift between the two tools is acceptable only when intentional and
+    documented. If inherited prompt/query behavior changes here, update this
+    guide and call out the divergence explicitly.
+
+
+===============================================================================
+4. STABLE CLI SURFACE
+===============================================================================
+
+BASIC USAGE:
+    python3 showparse_fsm.py -q "show version" \
+        --template /path/to/show_version.textfsm \
+        test1/data/*.dat
+
+    python3 showparse_fsm.py -Q "show run:shutdown" \
+        --template /path/to/interfaces.textfsm \
+        test1/data/*.dat
+
+    python3 showparse_fsm.py -q "+:show run:hostname" \
+        --template /path/to/hostnames.textfsm \
+        test1/data/*.dat
+
+SUPPORTED FLAGS:
+    -q
+        Standard query mode
+
+    -Q
+        Block-aware query mode
+
+    --template PATH
+        Required template path
+
+    files...
+        One or more files or globs
+
+SUPPORTED MODIFIER:
+    +
+        Process every prompt-delimited command match in file order
+
+QUERY GRAMMAR:
+    -q "command"
+    -q "command:pattern"
+    -q "+:command"
+    -q "+:command:pattern"
+
+    -Q "command"
+    -Q "command:pattern"
+    -Q "+:command"
+    -Q "+:command:pattern"
+
+ENFORCED LIMITS:
+    - exactly one query per run
+    - exactly one template per run
+    - no notes mode
+    - no banner/raw/color modes
+
+
+===============================================================================
+5. JSON OUTPUT CONTRACT
+===============================================================================
+
+V1 output is always a JSON array printed to stdout.
+
+ROOT SHAPE:
+    [
+      { file object },
+      { file object }
+    ]
+
+ONE FILE OBJECT PER INPUT FILE:
+    Every processed file gets one object, even when extraction or parsing
+    fails, or when parsing produces zero records.
+
+FILE OBJECT FIELDS:
+    file
+        basename only
+
+    path
+        absolute path
+
+    query_mode
+        "q" or "Q"
+
+    query
+        original query string as typed
+
+    template
+        absolute template path
+
+    status
+        one of:
+            ok
+            extract_not_found
+            extract_error
+            parse_empty
+            parse_error
+            partial_parse_error
+
+    match_count
+        number of extracted command matches, not parsed record count
+
+    matches
+        array of per-match results
+
+    error
+        file-level summary error string or null
+
+MATCH OBJECT FIELDS:
+    matched_command
+        real matched command text without the prompt token
+
+    status
+        one of:
+            ok
+            parse_empty
+            parse_error
+
+    record_count
+        number of parsed records in this match
+
+    records
+        array of dictionaries built from TextFSM headers and rows
+
+    error
+        per-match parse error string or null
+
+STATUS RULES:
+    ok
+        at least one extracted match produced records
+
+    extract_not_found
+        command was not found for that file
+
+    extract_error
+        file could not be read or extraction failed before parsing
+
+    parse_empty
+        extraction succeeded but every match produced zero records
+
+    parse_error
+        only one match failed to parse, or every extracted match failed
+
+    partial_parse_error
+        multiple extracted matches existed and at least one failed while at
+        least one other match was ok or empty
+
+
+===============================================================================
+6. EXTRACTION INHERITANCE FROM SHOWPARSE
+===============================================================================
+
+showparse_fsm inherits the most important parser philosophy from showparse.
+
+FOUNDATION:
+    Prompt-delimited extraction first, TextFSM second.
+
+INHERITED COMMAND MATCH RULES:
+    - command match must start at column 0
+    - prompt token must end in #, >, $, or %
+    - zero or one space after the prompt is allowed
+    - two spaces after the prompt do not count
+    - command extraction is case-insensitive and prefix-based
+    - output ends at the next appearance of the same prompt token at column 0
+
+WHY THIS MATTERS HERE:
+    TextFSM is not solving transcript parsing.
+    showparse_fsm must still find the correct command block before TextFSM sees
+    any text. That is why this tool inherits showparse's extraction logic.
+
+CURRENT QUERY FILTERING MODEL:
+    -q with pattern
+        grep matching lines only
+
+    -Q with pattern
+        full matching parent/child blocks only
+
+    No pattern
+        full extracted command output
+
+IMPORTANT:
+    TextFSM parses the final extracted/filtered text, not the raw file.
+
+
+===============================================================================
+7. TEXTFSM INTEGRATION MODEL
+===============================================================================
+
+DEPENDENCY MODEL:
+    textfsm is imported lazily at runtime so `-h` still works even when the
+    dependency is missing.
+
+    If textfsm is not installed, the tool exits with a clear message:
+        python3 -m pip install textfsm
+
+TEMPLATE MODEL:
+    V1 requires an explicit template path via --template.
+    There is no bundled production template library yet.
+
+WHY EXPLICIT TEMPLATE PATH ONLY:
+    - avoids hidden command-to-template mapping policy
+    - keeps v1 small and predictable
+    - lets the user experiment freely with their own templates
+
+PARSING MODEL:
+    For each extracted match:
+        1. get the final rendered text for that match
+        2. build a TextFSM parser from the template text
+        3. parse that rendered text
+        4. convert TextFSM rows into dictionaries using parser headers
+
+MATCH BOUNDARY RULE:
+    With `+`, match boundaries are preserved.
+    Do not flatten all parsed rows across matches into one giant list.
+
+WHY:
+    The user wants file/device identity at the root, and command-match identity
+    preserved underneath when more than one command result exists.
+
+
+===============================================================================
+8. INTENTIONAL BEHAVIORS THAT SHOULD NOT BE "CLEANED UP"
+===============================================================================
+
+1. SHOWPARSE_FSM DOES NOT REUSE SHOWPARSE'S HUMAN RENDERERS
+    No banners, no raw mode, no notes mode.
+    JSON is the whole point here.
+
+2. ONE QUERY PER RUN IS INTENTIONAL
+    A TextFSM template usually corresponds to one output shape.
+    Multi-query runs would muddy the JSON contract.
+
+3. ONLY `+` SURVIVED AS A MODIFIER
+    This is not a missing-feature bug.
+    It is the intentional minimum set for structured parsing.
+
+4. EMPTY PARSE RESULTS STILL EMIT A FILE OBJECT
+    Downstream scripts need to reason over the whole bulk target set, not just
+    successes.
+
+5. EXTRACTION MISS IS DATA, NOT JUST STDERR
+    `extract_not_found` belongs in JSON so later automation can inspect it.
+
+6. MATCH COUNT IS EXTRACTION COUNT
+    It is not the number of parsed rows.
+    Do not silently redefine it.
+
+7. TEMPLATE SYNTAX ERRORS ARE REPORTED AS PARSE ERRORS
+    V1 does not pre-compile templates as a separate validation stage.
+    If a template breaks parsing, that appears in the JSON status model.
+
+8. SHOWPARSE_CODE_GUIDE.TXT STAYS SEPARATE
+    Do not merge the two guides.
+    Future agents need a dedicated handoff for the FSM companion.
+
+
+===============================================================================
+9. TESTING WORKFLOW
+===============================================================================
+
+MAIN FILE:
+    tests/test_showparse_fsm.py
+
+TEST TEMPLATE FIXTURES:
+    tests/textfsm_templates/
+
+IMPORTANT TEST SPLIT:
+    - base logic / status tests should run without textfsm
+    - actual TextFSM integration tests should skip cleanly when textfsm is not
+      installed
+
+WHY:
+    The base showparse repo should stay usable for people who only need the
+    original CLI, while still allowing full FSM validation where the dependency
+    exists.
+
+RECOMMENDED COMMANDS:
+    python3 -m unittest discover -s /tools/showparse/tests -v
+
+    If textfsm is not installed globally, a local target directory works for
+    validation, for example:
+        python3 -m pip install --target /tmp/showparse_textfsm textfsm
+        PYTHONPATH=/tmp/showparse_textfsm python3 -m unittest discover -s /tools/showparse/tests -v
+
+WHAT FSM TESTS SHOULD COVER:
+    - exactly one query enforcement
+    - unsupported modifier rejection
+    - unsupported flag rejection
+    - missing template path
+    - missing textfsm dependency path
+    - file-rooted JSON structure
+    - + multi-match nesting
+    - q and Q extraction paths
+    - extract_not_found
+    - parse_empty
+    - parse_error
+    - partial_parse_error
+
+
+===============================================================================
+10. SAFE CHANGE CHECKLIST
+===============================================================================
+
+IF CHANGING EXTRACTION BEHAVIOR:
+    - verify it still matches showparse's prompt rules unless the divergence is
+      intentional
+    - verify NX-OS one-space prompt support still works
+    - verify two-space prompt false positives are still rejected
+    - update this guide if behavior intentionally diverges from showparse
+
+IF CHANGING THE JSON SCHEMA:
+    - preserve one top-level object per file unless intentionally redesigning
+    - preserve `matches` nesting for `+` unless intentionally redesigning
+    - update tests/test_showparse_fsm.py
+    - update README.md
+    - update this guide
+
+IF ADDING MODIFIERS:
+    - confirm they help structured parsing rather than human readability only
+    - define whether they transform parse input or only metadata
+    - update CLI help
+    - update this guide
+    - add targeted tests
+
+IF ADDING TEMPLATE DISCOVERY OR REGISTRIES:
+    - document precedence rules clearly
+    - document how command/query maps to template choice
+    - add tests for missing/ambiguous mappings
+
+IF CHANGING FAILURE POLICY:
+    - preserve file-rooted output unless intentionally redesigning
+    - keep later automation in mind
+    - avoid silently dropping failed files
+
+
+===============================================================================
+11. QUICK REFERENCE
+===============================================================================
+
+CHANGE EXTRACTION / PROMPT MATCHING:
+    -> _get_command_pattern()
+    -> extract_commands()
+    -> extract_command()
+
+CHANGE SIMPLE QUERY FILTERING:
+    -> grep_output()
+
+CHANGE BLOCK QUERY FILTERING:
+    -> grep_output_with_blocks()
+
+CHANGE SUPPORTED MODIFIERS:
+    -> DEFINED_Q_MODIFIERS
+    -> DEFINED_Q_BLOCK_MODIFIERS
+    -> parse_q_query()
+    -> parse_query_block()
+
+CHANGE TEXTFSM PARSING:
+    -> parse_rendered_output_with_textfsm()
+    -> process_file()
+
+CHANGE FILE-LEVEL STATUS BEHAVIOR:
+    -> classify_extract_status()
+    -> summarize_file_status()
+    -> summarize_file_error()
+
+CHANGE TEMPLATE LOADING / DEPENDENCY BEHAVIOR:
+    -> validate_template_path()
+    -> load_template_text()
+    -> load_textfsm_module()
+
+FIRST FILES A FUTURE AGENT SHOULD READ:
+    1. showparse_fsm.code_guide.txt
+    2. showparse_fsm.py
+    3. tests/test_showparse_fsm.py
+    4. SHOWPARSE_CODE_GUIDE.txt
+
+
+===============================================================================
+                               END OF GUIDE
+===============================================================================

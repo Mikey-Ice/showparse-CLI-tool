@@ -74,6 +74,32 @@ See also:
 - `SHOWPARSE_CODE_GUIDE.txt` for the canonical future-session handoff and code guide
 - `REGRESSION_CHECKLIST.md` for smoke-test commands
 
+## showparse_fsm Companion
+
+`showparse_fsm.py` is the structured-data companion to `showparse.py`.
+It keeps the same prompt-aware bulk extraction idea, but applies one TextFSM
+template per run and emits file-rooted JSON instead of human-oriented text.
+
+Install the runtime dependency:
+
+```bash
+python3 -m pip install textfsm
+```
+
+Example:
+
+```bash
+python3 showparse_fsm.py -q "show version" --template /path/to/show_version.textfsm test1/data/*.dat
+```
+
+The output root is always a JSON array with one object per processed file, plus
+nested `matches` entries when `+` is used.
+
+If you want help learning how to script against that JSON, see:
+
+- `SHOWPARSE_FSM_JSON_HELPER_GUIDE.txt`
+- `showparse_fsm_json_helper_template.py`
+
 ## Large Practice Fixtures
 
 The fast regression fixtures live in `test1/data`. If you want realistic

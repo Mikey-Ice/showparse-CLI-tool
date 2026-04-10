@@ -1,0 +1,483 @@
+===============================================================================
+         SHOWPARSE_FSM JSON HELPER GUIDE
+===============================================================================
+
+This guide teaches the basic Python you need to read `showparse_fsm.py`
+output and turn it into helper scripts for your own analysis.
+
+The goal is not to teach every part of Python or JSON.
+The goal is to teach you how to think about *this project's JSON shape*.
+
+
+===============================================================================
+1. THE MENTAL MODEL
+===============================================================================
+
+`showparse_fsm.py` does the extraction and TextFSM parsing.
+Your Python helper script does the analysis.
+
+Think about it like this:
+
+    showparse_fsm.py
+        -> finds the right command output in each .dat file
+        -> applies one TextFSM template
+        -> emits JSON
+
+    your helper script
+        -> reads that JSON
+        -> loops through files
+        -> loops through matches
+        -> loops through records
+        -> prints or summarizes what you care about
+
+This means you usually do NOT write a Python script that parses raw `.dat`
+files directly. Instead, you let `showparse_fsm.py` do the heavy lifting first.
+
+
+===============================================================================
+2. THE ROOT JSON SHAPE
+===============================================================================
+
+The output root is always a JSON array:
+
+    [
+      { file object },
+      { file object },
+      { file object }
+    ]
+
+Each top-level item represents one processed file/device.
+
+Important:
+    top level = files
+    inside each file = matches
+    inside each match = records
+
+
+===============================================================================
+3. REAL EXAMPLE: ONE FILE, ONE RECORD
+===============================================================================
+
+Command:
+
+    python3 showparse_fsm.py -q "show version" \
+        --template tests/textfsm_templates/show_version_uptime.textfsm \
+        test1/data/192.168.1.100-2025-12-18_1343.dat
+
+Typical output:
+
+    [
+      {
+        "file": "192.168.1.100-2025-12-18_1343.dat",
+        "path": "/tools/showparse/test1/data/192.168.1.100-2025-12-18_1343.dat",
+        "query_mode": "q",
+        "query": "show version",
+        "template": "/tools/showparse/tests/textfsm_templates/show_version_uptime.textfsm",
+        "status": "ok",
+        "match_count": 1,
+        "matches": [
+          {
+            "matched_command": "show version",
+            "status": "ok",
+            "record_count": 1,
+            "records": [
+              {
+                "VERSION": "17.15.1",
+                "UPTIME": "17 minutes"
+              }
+            ],
+            "error": null
+          }
+        ],
+        "error": null
+      }
+    ]
+
+What that means:
+
+    file
+        the basename of the device capture file
+
+    status
+        whether this file succeeded overall
+
+    match_count
+        how many command outputs were extracted from this file
+
+    matches
+        one entry for each extracted command match
+
+    matched_command
+        the real command that matched in the file
+
+    record_count
+        how many TextFSM records came out of that matched command
+
+    records
+        the actual parsed field dictionaries
+
+
+===============================================================================
+4. REAL EXAMPLE: ONE FILE, MANY RECORDS
+===============================================================================
+
+Command:
+
+    python3 showparse_fsm.py -Q "show run:shutdown" \
+        --template tests/textfsm_templates/show_run_interface.textfsm \
+        test1/data/192.168.1.100-2025-12-18_1343.dat
+
+Typical output:
+
+    [
+      {
+        "file": "192.168.1.100-2025-12-18_1343.dat",
+        "status": "ok",
+        "match_count": 1,
+        "matches": [
+          {
+            "matched_command": "show running-config",
+            "status": "ok",
+            "record_count": 3,
+            "records": [
+              { "INTERFACE": "Ethernet0/1" },
+              { "INTERFACE": "Ethernet0/2" },
+              { "INTERFACE": "Ethernet0/3" }
+            ],
+            "error": null
+          }
+        ],
+        "error": null
+      }
+    ]
+
+This is the important lesson:
+
+    one file object
+        can contain
+    one match object
+        that contains
+    many record objects
+
+This is exactly how log templates, interface templates, ARP templates, and many
+other NTC templates will behave.
+
+
+===============================================================================
+5. THE THREE CORE LOOPS
+===============================================================================
+
+This is the part you need to get comfortable with.
+
+You will almost always loop in this order:
+
+    for file_entry in data:
+        for match in file_entry["matches"]:
+            for record in match["records"]:
+                do something with record
+
+That is the most important pattern in this whole guide.
+
+Why three loops?
+
+    first loop
+        because the top level is one object per file/device
+
+    second loop
+        because one file can have multiple extracted matches
+        especially when you use `+`
+
+    third loop
+        because one matched command can produce multiple parsed records
+
+
+===============================================================================
+6. BEGINNER PYTHON TEMPLATE
+===============================================================================
+
+This is the bare minimum pattern:
+
+```python
+import json
+import sys
+
+data = json.load(sys.stdin)
+
+for file_entry in data:
+    for match in file_entry["matches"]:
+        for record in match["records"]:
+            print(file_entry["file"], record)
+```
+
+That prints one line per parsed record.
+
+You can then replace `record` with specific fields:
+
+```python
+print(file_entry["file"], record.get("UPTIME"))
+```
+
+Use `.get("FIELDNAME")` when possible.
+It is safer than `record["FIELDNAME"]` while you are learning, because it
+returns `None` instead of crashing if the field does not exist.
+
+
+===============================================================================
+7. SAFE STATUS HANDLING
+===============================================================================
+
+Not every file will be `ok`.
+Sometimes a command is not found.
+Sometimes the template returns zero records.
+Sometimes parsing fails.
+
+File-level statuses you will see:
+
+    ok
+        at least one record was parsed from the file
+
+    extract_not_found
+        the command was not found in that file
+
+    extract_error
+        the file could not be read or extraction failed
+
+    parse_empty
+        extraction worked, but the template returned zero records
+
+    parse_error
+        parsing failed
+
+    partial_parse_error
+        some matches were ok and at least one failed
+
+Match-level statuses you will see:
+
+    ok
+    parse_empty
+    parse_error
+
+Good beginner rule:
+
+    only loop through `records` when the match status is `ok`
+
+Example:
+
+```python
+for file_entry in data:
+    if file_entry["status"] not in {"ok", "partial_parse_error"}:
+        continue
+
+    for match in file_entry["matches"]:
+        if match["status"] != "ok":
+            continue
+
+        for record in match["records"]:
+            print(file_entry["file"], record)
+```
+
+
+===============================================================================
+8. WHAT `+` CHANGES
+===============================================================================
+
+Without `+`, you usually get one extracted match per file.
+
+With `+`, one file can contain multiple matched commands:
+
+    -q "+:show run:hostname"
+
+That means:
+
+    one file_entry
+        can have multiple entries in `matches`
+
+So if you use `+`, do NOT assume:
+
+    file_entry["matches"][0]
+
+is the only one that matters.
+
+Loop through all of them.
+
+
+===============================================================================
+9. FOUR WORKED EXAMPLES
+===============================================================================
+
+--------------------------------------------------------------------------
+EXAMPLE 1: PRINT UPTIME PER DEVICE
+--------------------------------------------------------------------------
+
+Command:
+
+    python3 showparse_fsm.py -q "show version" \
+        --template tests/textfsm_templates/show_version_uptime.textfsm \
+        test1/data/*.dat \
+    | python3 - <<'PY'
+    import json
+    import sys
+
+    data = json.load(sys.stdin)
+
+    for file_entry in data:
+        for match in file_entry["matches"]:
+            if match["status"] != "ok":
+                continue
+            for record in match["records"]:
+                print(f'{file_entry["file"]}: {record.get("UPTIME")}')
+    PY
+
+--------------------------------------------------------------------------
+EXAMPLE 2: PRINT ONLY FAILED FILES
+--------------------------------------------------------------------------
+
+Command:
+
+    python3 showparse_fsm.py -q "show version" \
+        --template /path/to/cisco_ios_show_version.textfsm \
+        test1/data/*.dat \
+    | python3 - <<'PY'
+    import json
+    import sys
+
+    data = json.load(sys.stdin)
+
+    for file_entry in data:
+        if file_entry["status"] != "ok":
+            print(file_entry["file"], file_entry["status"], file_entry["error"])
+    PY
+
+--------------------------------------------------------------------------
+EXAMPLE 3: FLATTEN ALL RECORDS ACROSS FILES
+--------------------------------------------------------------------------
+
+Command:
+
+    python3 showparse_fsm.py -Q "show run:shutdown" \
+        --template tests/textfsm_templates/show_run_interface.textfsm \
+        test1/data/*.dat \
+    | python3 - <<'PY'
+    import json
+    import sys
+
+    data = json.load(sys.stdin)
+
+    flattened = []
+
+    for file_entry in data:
+        for match in file_entry["matches"]:
+            if match["status"] != "ok":
+                continue
+            for record in match["records"]:
+                flattened.append(
+                    {
+                        "file": file_entry["file"],
+                        "matched_command": match["matched_command"],
+                        **record,
+                    }
+                )
+
+    for item in flattened:
+        print(item)
+    PY
+
+--------------------------------------------------------------------------
+EXAMPLE 4: HANDLE MULTI-RECORD OUTPUTS LIKE LOGS OR INTERFACES
+--------------------------------------------------------------------------
+
+Imagine a template that returns one record per log line.
+The pattern is the same as interfaces:
+
+```python
+import json
+import sys
+
+data = json.load(sys.stdin)
+
+for file_entry in data:
+    for match in file_entry["matches"]:
+        if match["status"] != "ok":
+            continue
+
+        print(f'FILE: {file_entry["file"]}')
+        print(f'MATCHED COMMAND: {match["matched_command"]}')
+        print(f'RECORDS RETURNED: {match["record_count"]}')
+
+        for record in match["records"]:
+            print("  record:", record)
+```
+
+The important part is that you should think:
+
+    "This match returned many records"
+
+not:
+
+    "This file only has one parsed object"
+
+
+===============================================================================
+10. WHEN TO USE `.get()` VS `[]`
+===============================================================================
+
+Use this while learning:
+
+    record.get("UPTIME")
+
+Why?
+Because some templates return different fields than you expect, and `.get()`
+won't crash if the field is missing.
+
+Use this when you are sure the field must exist:
+
+    record["UPTIME"]
+
+That is stricter, but it will raise an error if the field is missing.
+
+Good beginner recommendation:
+
+    use `.get()` first
+    switch to `[]` later when you trust the template
+
+
+===============================================================================
+11. RECOMMENDED PRACTICE FLOW
+===============================================================================
+
+1. Start with one file and one simple template.
+
+    Example:
+        show version -> uptime/version
+
+2. Print the entire `record` object first.
+
+    Do this before trying to access specific fields.
+    It helps you learn what the template is actually returning.
+
+3. Then print one or two specific fields.
+
+4. Then move to many files.
+
+5. Then try a multi-record template.
+
+6. Then try `+` so you get comfortable with multiple matches.
+
+
+===============================================================================
+12. USE THE STARTER TEMPLATE
+===============================================================================
+
+The companion starter script lives here:
+
+    showparse_fsm_json_helper_template.py
+
+Recommended first use:
+
+    python3 showparse_fsm.py -q "show version" \
+        --template tests/textfsm_templates/show_version_uptime.textfsm \
+        test1/data/*.dat \
+    | python3 showparse_fsm_json_helper_template.py
+
+Then edit the clearly marked "EDIT HERE" section in that script for whatever
+analysis you want to do next.
