@@ -52,7 +52,7 @@ class RenderedMatch:
 def _read_file_content(file_path):
     """Read and return file content, or an error tuple on failure."""
     try:
-        with open(file_path, "r") as file_handle:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as file_handle:
             return file_handle.read()
     except IOError as error:
         return (None, f"Error reading file: {error}")

@@ -69,7 +69,7 @@ def print_banner(filename, use_color=True):
 def _read_file_content(file_path):
     """Read and return file content, or an error tuple on failure."""
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             return f.read()
     except IOError as e:
         return (None, f"Error reading file: {e}")
